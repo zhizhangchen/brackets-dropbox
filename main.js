@@ -17,6 +17,8 @@ define(function (require, exports, module) {
         FileUtils           = brackets.getModule("file/FileUtils"),
         ExtensionUtils      = brackets.getModule("utils/ExtensionUtils"),
         Dialogs             = brackets.getModule("widgets/Dialogs"),
+        Commands            = brackets.getModule("command/Commands"),
+        LiveDevelopment     = brackets.getModule("LiveDevelopment/LiveDevelopment"),
         Menus               = brackets.getModule("command/Menus");
 
     var DROPBOX_MENU = "dropbox-menu",
@@ -24,12 +26,12 @@ define(function (require, exports, module) {
         AUTH_COMMAND_ID = "dropbox.authorize",
         AUTH_MENU_NAME = "Authorize",
         OPEN_COMMAND_ID = "dropbox.open",
-        OPEN_MENU_NAME = "Open Folder...",
+        OPEN_MENU_NAME = "Open Dropbox Folder...",
         SAVE_COMMAND_ID = "dropbox.save",
-        SAVE_MENU_NAME = "Save";
+        SAVE_MENU_NAME = "Save",
+        SANDBOX_PROJECTS = "brackets-projects";
 
-    var dropbox,
-        dropboxFiles,
+    var dropboxFiles,
         dropboxFolder,
         moduleDir;
 
@@ -41,11 +43,22 @@ define(function (require, exports, module) {
      * Open a dialog to select a Dropbox folder
      */
     function selectDropboxFolder() {
-        readDropboxFolder(dropbox, "/");
-        Dialogs.showModalDialog("dp-open-folder-dialog").done(function (id) {
-            if (id === 'open') {
-                createProjectFiles();
+        getDropbox(function (error, client) {
+            if (error) {
+                showMessage('Authentication error: ' + error);
             }
+            client.getUserInfo(function(error, userInfo) {
+                if (error) {
+                    showMessage(error);
+                }
+                $('.dropbox-user').html('Dropbox user: ' + userInfo.name);
+            });
+            readDropboxFolder(dropbox, "/");
+            Dialogs.showModalDialog("dp-open-folder-dialog").done(function (id) {
+                if (id === 'open') {
+                    createProjectFiles();
+                }
+            });
         });
     }
 
@@ -55,18 +68,14 @@ define(function (require, exports, module) {
      * in the project tree)
      */
     function createProjectFiles() {
-        var deferreds = [];
         var len  = dropboxFiles.length;
-        $(DocumentManager).off("currentDocumentChange", documentChangeHandler);
-        for (var i=0; i<len; i++) {
-            deferreds.push( createProjectFile(dropboxFiles[i]) );
-        }
-        $.when.apply(null, deferreds).done(function() {
-            console.log('*** all deferreds done, registering currentDocumentChange event');
-            $(DocumentManager).on("currentDocumentChange", documentChangeHandler);
-            // Force a documentChangeHandler to read the currently selected document from Dropbox
-            documentChangeHandler();
-        });
+        new NativeFileSystem.DirectoryEntry(os.tmpDir()).getDirectory(dropboxFolder.substr(1), {create:true}, function (dirEntry){
+            for (var i=0; i<len; i++) {
+                createProjectFile(dirEntry, dropboxFiles[i]);
+            }
+        }, onError);
+
+        ProjectManager.openProject("dropbox://" + dropboxFolder);
     }
 
     /**
@@ -74,19 +83,30 @@ define(function (require, exports, module) {
      * @param file
      * @return {*}
      */
-    function createProjectFile(file) {
-        var deferred = $.Deferred();
-        var destinationDir = ProjectManager.getProjectRoot().fullPath;
-        ProjectManager.createNewItem(destinationDir, file.name, true).done(function(data) {
-            // At this point we know the file has been created
-            console.log("done createProjectFile " + file.name);
-            DocumentManager.getDocumentForPath(data.fullPath).done(function (doc) {
-                console.log("done getDocumentForPath " + file.name);
-                // At this point we know the file has been created *and* added to the project: deferred resolved.
-                deferred.resolve(doc);
-            });
-        });
-        return deferred;
+    function _writeFile (dirEntry, fileName, contents) {
+        dirEntry.getFile(fileName, {create:true}, function (fileEntry) {
+            console.log("Created file:", fileEntry);
+            fileEntry.createWriter(function (fileWriter) {
+                var ab, ia;
+
+                fileWriter.onwriteend = function (progressEvent) {
+                    console.log("File written:" , fileEntry.toURL());
+                };
+                fileWriter.onerror = onError;
+                ab = new ArrayBuffer(contents.length);
+                ia = new Uint8Array(ab);
+                for (var i = 0; i < contents.length; i++) {
+                    ia[i] = contents.charCodeAt(i);
+                }
+                fileWriter.write(new Buffer(ia));
+            }, onError);
+        })
+    }
+    function createProjectFile(dirEntry, file) {
+        console.log("creating " + file.name);
+        readDropboxFile(dropboxFolder + "/" + file.name).done(function(contents) {
+            _writeFile(dirEntry, file.name, contents);
+        })
     }
 
     /**
@@ -107,7 +127,7 @@ define(function (require, exports, module) {
      */
     function readDropboxFile(path) {
         var deferred = $.Deferred();
-        dropbox.readFile(path, function(error, data) {
+        dropbox.readFile(path, {binary: true},   function(error, data) {
             if (error) {
                 deferred.reject(error);  // Something went wrong.
             }
@@ -130,11 +150,6 @@ define(function (require, exports, module) {
      * Authorize via Dropbox OAuth
      */
     function authorize() {
-        dropbox = new Dropbox.Client({
-            key: "ggCaheYC2OA=|rbHoiifVtLfQqLS6uK8cu7SNihetQxMsJkVMPbtwlA==", sandbox: true
-        });
-
-        dropbox.authDriver(dropboxOAuthDriver);
 
         dropbox.authenticate(function (error, client) {
             if (error) {
@@ -149,6 +164,51 @@ define(function (require, exports, module) {
         });
     }
 
+    function onError (err) {
+         var msg = 'Error: ';
+         switch (err.code) {
+             case FileError.NOT_FOUND_ERR:
+                 msg += 'File or directory not found';
+                 break;
+             case FileError.SECURITY_ERR:
+                 msg += 'Insecure or disallowed operation';
+                 break;
+             case FileError.ABORT_ERR:
+                 msg += 'Operation aborted';
+                 break;
+             case FileError.NOT_READABLE_ERR:
+                 msg += 'File or directory not readable';
+                 break;
+             case FileError.ENCODING_ERR:
+                 msg += 'Invalid encoding';
+                 break;
+             case FileError.NO_MODIFICATION_ALLOWED_ERR:
+                 msg += 'Cannot modify file or directory';
+                 break;
+             case FileError.INVALID_STATE_ERR:
+                 msg += 'Invalid state';
+                 break;
+             case FileError.SYNTAX_ERR:
+                 msg += 'Invalid line-ending specifier';
+                 break;
+             case FileError.INVALID_MODIFICATION_ERR:
+                 msg += 'Invalid modification';
+                 break;
+             case FileError.QUOTA_EXCEEDED_ERR:
+                 msg += 'Storage quota exceeded';
+                 break;
+             case FileError.TYPE_MISMATCH_ERR:
+                 msg += 'Invalid filetype';
+                 break;
+             case FileError.PATH_EXISTS_ERR:
+                 msg += 'File or directory already exists at specified path';
+                 break;
+             default:
+                 msg += 'Unknown Error';
+                 break;
+         }
+         console.warn(msg);
+    }
     /**
      * Read content of Dropbox folder and populate the Open Folder dialog with the list of files
      * @param dropbox
@@ -216,21 +276,12 @@ define(function (require, exports, module) {
         $('body').append($(Mustache.render(dpOpenFolderDialogHtml)));
 
         // Register commands
-        CommandManager.register(AUTH_MENU_NAME, AUTH_COMMAND_ID, authorize);
         CommandManager.register(OPEN_MENU_NAME, OPEN_COMMAND_ID, selectDropboxFolder);
-        CommandManager.register(SAVE_MENU_NAME, SAVE_COMMAND_ID, saveDropboxFile);
 
         // Add menus
-        var dropboxMenu =  Menus.getMenu(DROPBOX_MENU);
-        if (!dropboxMenu) {
-            dropboxMenu = Menus.addMenu(DROPBOX_MENU_NAME, DROPBOX_MENU, Menus.FIRST);
-        }
-
-        dropboxMenu.addMenuItem(AUTH_COMMAND_ID);
-        dropboxMenu.addMenuDivider();
-        dropboxMenu.addMenuItem(OPEN_COMMAND_ID);
-        dropboxMenu.addMenuDivider();
-        dropboxMenu.addMenuItem(SAVE_COMMAND_ID);
+        var fileMenu = Menus.getMenu(Menus.AppMenuBar.FILE_MENU);
+        fileMenu.addMenuItem(OPEN_COMMAND_ID, "", Menus.AFTER,
+                Commands.FILE_OPEN_FOLDER);
 
         $('body').on('mouseover', '.folder-row', function(event) {
             $(event.currentTarget).addClass('highlight');
@@ -253,20 +304,20 @@ define(function (require, exports, module) {
         moduleDir = FileUtils.getNativeModuleDirectoryPath(module);
     }
 
-    var dropboxOAuthDriver = {
-        url: function() { return ""; },
-        doAuthorize: function(authUrl, token, tokenSecret, callback) {
-            var w = window.open(authUrl);
-            // Hack to find out when the dropbox authorization window was closed
-            // (check every 500ms to see if it's still there)
-            var timer =  setInterval(function() {
-                if (w.closed) {
-                    clearInterval(timer);
-                    callback(token);
-                }
-            }, 500);
+    LiveDevelopment.addUrlMapper(function (url) {
+        url = url.replace(/file:\/\/dropbox:\/\/(.*)/, "file://" +os.tmpDir() + "$1");
+        return  url;
+    })
+    $(DocumentManager).on("documentSaved", function (event, doc) {
+        var path = doc.file.fullPath;
+        if (path.indexOf("dropbox://") === 0) {
+            path = path.substr(11);
+            new NativeFileSystem.DirectoryEntry(os.tmpDir()).getDirectory(path.substr(0, path.lastIndexOf("/")), {create:true}, function (dirEntry){
+                _writeFile(dirEntry, doc.file.name, doc.getText(true));
+            }, onError);
         }
-    };
+    });
+
 
     initialize();
 
