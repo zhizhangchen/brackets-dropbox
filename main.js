@@ -29,12 +29,31 @@ define(function (require, exports, module) {
         OPEN_MENU_NAME = "Open Dropbox Folder...",
         SAVE_COMMAND_ID = "dropbox.save",
         SAVE_MENU_NAME = "Save",
-        SANDBOX_PROJECTS = "brackets-projects";
+        PROJECTS_TEMP_FOLDER = "brackets-projects";
 
     var dropboxFiles,
         dropboxFolder,
         moduleDir;
 
+    function _getDropboxProjectFolder(folderName, callback) {
+        var getTempRootDirectory = function(callback) {
+            if (os) {
+                callback(new NativeFileSystem.DirectoryEntry(os.tmpDir()));
+            }
+            else {
+                window.BlobBuilder = window.BlobBuilder || window.MozBlobBuilder || window.WebKitBlobBuilder;
+                window.requestFileSystem = window.requestFileSystem || window.webkitRequestFileSystem;
+                requestFileSystem(window.TEMPORARY, 20*1024*1024, function(filesystem) {
+                    callback(filesystem.root);
+                })
+            }
+        }
+        getTempRootDirectory(function (rootEntry) {
+            rootEntry.getDirectory(PROJECTS_TEMP_FOLDER,{create:true},  function (dirEntry) {
+                dirEntry.getDirectory(folderName, {create:true}, callback);
+            })
+        })
+    }
     function showMessage(msg) {
         Dialogs.showModalDialog(Dialogs.DIALOG_ID_ERROR, "Dropbox Extension", msg);
     }
@@ -69,12 +88,11 @@ define(function (require, exports, module) {
      */
     function createProjectFiles() {
         var len  = dropboxFiles.length;
-        new NativeFileSystem.DirectoryEntry(os.tmpDir()).getDirectory(dropboxFolder.substr(1), {create:true}, function (dirEntry){
+        _getDropboxProjectFolder(dropboxFolder.substr(1), function (dirEntry) {
             for (var i=0; i<len; i++) {
                 createProjectFile(dirEntry, dropboxFiles[i]);
             }
         }, onError);
-
         ProjectManager.openProject("dropbox://" + dropboxFolder);
     }
 
@@ -87,7 +105,7 @@ define(function (require, exports, module) {
         dirEntry.getFile(fileName, {create:true}, function (fileEntry) {
             console.log("Created file:", fileEntry);
             fileEntry.createWriter(function (fileWriter) {
-                var ab, ia;
+                var bb, ab, ia;
 
                 fileWriter.onwriteend = function (progressEvent) {
                     console.log("File written:" , fileEntry.toURL());
@@ -98,7 +116,24 @@ define(function (require, exports, module) {
                 for (var i = 0; i < contents.length; i++) {
                     ia[i] = contents.charCodeAt(i);
                 }
-                fileWriter.write(new Buffer(ia));
+                if (window.Buffer)
+                    bb = new Buffer(ia);
+                else {
+                    try {
+                        bb = new Blob([contents]);
+                    } catch(e) {
+                        if (window.BlobBuilder){
+                            bb = new BlobBuilder(); // Create a new Blob on-the-fly.
+                            bb.append(contents);
+                            bb = bb.getBlob();
+                        } else {
+                            console.error("No Blob or BlobBuilder constructor.");
+                            return;
+                        }
+                    }
+                }
+                bb && fileWriter.write(bb);
+
             }, onError);
         })
     }
@@ -305,16 +340,22 @@ define(function (require, exports, module) {
     }
 
     LiveDevelopment.addUrlMapper(function (url) {
-        url = url.replace(/file:\/\/dropbox:\/\/(.*)/, "file://" +os.tmpDir() + "$1");
+        if (os)
+            url = url.replace(/file:\/\/dropbox:\/\/(.*)/, "file://" +
+                os.tmpDir() +"/" + PROJECTS_TEMP_FOLDER + "$1");
+        else
+            url = url.replace(/^.*dropbox:\/\/(.*)/, "filesystem:" +
+                location.origin + "/temporary/" + PROJECTS_TEMP_FOLDER + "$1");
         return  url;
     })
     $(DocumentManager).on("documentSaved", function (event, doc) {
         var path = doc.file.fullPath;
         if (path.indexOf("dropbox://") === 0) {
-            path = path.substr(11);
-            new NativeFileSystem.DirectoryEntry(os.tmpDir()).getDirectory(path.substr(0, path.lastIndexOf("/")), {create:true}, function (dirEntry){
-                _writeFile(dirEntry, doc.file.name, doc.getText(true));
-            }, onError);
+            var folderName = path.replace("dropbox://", "");
+            folderName = folderName.substr(0, folderName.lastIndexOf("/")).substr(1);
+            _getDropboxProjectFolder(folderName, function (entry) {
+                _writeFile(entry, doc.file.name, doc.getText(true));
+            });
         }
     });
 
