@@ -335,6 +335,32 @@ define(function (require, exports, module) {
             event.preventDefault();
             readDropboxFolder(dropbox, $(event.currentTarget).data('path'));
         });
+        $('body').on('click','#new-dropbox-folder', function () {
+            var newFolder= $("<td><input/></td>");
+            var primaryButton = $('.dialog-button.primary');
+            $('.dropbox-file-rows').append($('<tr><td class="file-icon">' +
+                '<img src="' + moduleDir + '/img/folder.png"/> ' +
+                "</td>" +
+                '</tr>').append(newFolder).append('<td/>').append('<td/>'));
+            newFolder.find('input').val("Untitled").focus(function () {
+                primaryButton.removeClass('primary');
+            }).focus().bind("blur keydown", function (e) {
+                var code = (e.keyCode ? e.keyCode : e.which);
+                if (code && code !== 13)
+                    return;
+                primaryButton.addClass('primary');
+                brackets.fs.makedir("dropbox://" + dropboxFolder + "/" + $(this).val(), null,  function () {
+                    readDropboxFolder(dropbox, dropboxFolder);
+                });
+            });
+
+
+        });
+        $('body').on('click','#delete-dropbox-folder', function () {
+            dropbox.remove(dropboxFolder, function (){
+                readDropboxFolder(dropbox, $(".dropbox-path-link").last().prev().data('path'));
+            });
+        });
 
         moduleDir = FileUtils.getNativeModuleDirectoryPath(module);
     }
