@@ -369,7 +369,7 @@ define(function (require, exports, module) {
         if (os)
             url = url.replace(/file:\/\/dropbox:\/\/(.*)/, "file://" +
                 os.tmpDir() +"/" + PROJECTS_TEMP_FOLDER + "$1");
-        else
+        else if (window.device === "Simulator")
             url = url.replace(/^.*dropbox:\/\/(.*)/, "filesystem:" +
                 location.origin + "/temporary/" + PROJECTS_TEMP_FOLDER + "$1");
         return  url;
